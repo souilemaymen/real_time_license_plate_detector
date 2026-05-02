@@ -1,2 +1,7 @@
 /dataset
 /.venv
+/yolov8n.pt
+/license_plate_detector.pt
+/plaque.jpg
+/output.jpg
+/output_realtime.mp4
