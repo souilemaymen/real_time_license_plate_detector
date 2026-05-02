@@ -1,140 +1,88 @@
-import tkinter as tk
-from tkinter import filedialog, scrolledtext
+import streamlit as st
 import cv2
-from PIL import Image, ImageTk
-import threading
-import time
-from detector import LicensePlateDetector
+import numpy as np
+import re
+from ultralytics import YOLO
+import easyocr
+import av
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 
-class PlateDashboard:
-    def __init__(self, root, model_path):
-        self.root = root
-        self.root.title("Dashboard Reconnaissance de plaques")
-        self.root.geometry("1000x700")
-        self.root.configure(bg="#1e1e2f")
+# ------------------ Configuration de la page ------------------
+st.set_page_config(page_title="License Plate Detector - Realtime", layout="wide")
+st.title("🚗 Détection et reconnaissance de plaques en temps réel")
+st.markdown("Placez votre plaque devant la webcam, la détection se fait automatiquement.")
 
-        self.detector = LicensePlateDetector(model_path)
-        self.camera_running = False
-        self.cap = None
-        self.last_frame = None
 
-        # ----- Widgets -----
-        # Cadre des boutons
-        btn_frame = tk.Frame(root, bg="#2d2d44")
-        btn_frame.pack(pady=10)
+# ------------------ Chargement des modèles (mis en cache) ------------------
+@st.cache_resource
+def load_model(model_path):
+    return YOLO(model_path)
 
-        self.btn_image = tk.Button(btn_frame, text="📁 Charger une image", command=self.load_image,
-                                   font=("Arial", 12), bg="#4c9aff", fg="white", padx=15, pady=5)
-        self.btn_image.grid(row=0, column=0, padx=10)
 
-        self.btn_camera = tk.Button(btn_frame, text="🎥 Démarrer caméra", command=self.start_camera,
-                                    font=("Arial", 12), bg="#4c9aff", fg="white", padx=15, pady=5)
-        self.btn_camera.grid(row=0, column=1, padx=10)
+@st.cache_resource
+def load_ocr(languages=['en']):
+    return easyocr.Reader(languages)
 
-        self.btn_stop = tk.Button(btn_frame, text="⏹️ Arrêter caméra", command=self.stop_camera,
-                                  font=("Arial", 12), bg="#ff6b6b", fg="white", padx=15, pady=5, state=tk.DISABLED)
-        self.btn_stop.grid(row=0, column=2, padx=10)
 
-        # Zone d'affichage vidéo / image
-        self.video_label = tk.Label(root, bg="#0a0a14", relief="sunken")
-        self.video_label.pack(pady=10, padx=10, expand=True, fill=tk.BOTH)
+# ------------------ Paramètres dans la sidebar ------------------
+with st.sidebar:
+    st.header("⚙️ Paramètres")
+    model_path = st.text_input("Chemin du modèle YOLO", value="license_plate_detector.pt")
+    conf_thresh = st.slider("Seuil de confiance", 0.25, 0.9, 0.5, 0.05)
+    st.markdown("---")
+    st.info("Assurez-vous que le modèle détecte les plaques d'immatriculation.")
 
-        # Zone de texte pour les résultats
-        self.log_area = scrolledtext.ScrolledText(root, height=8, font=("Consolas", 10),
-                                                   bg="#2d2d44", fg="#00ffcc", insertbackground="white")
-        self.log_area.pack(pady=10, padx=10, fill=tk.X)
-        self.log("Dashboard prêt. Choisissez une image ou démarrez la caméra.")
+# Chargement effectif
+model = load_model(model_path)
+ocr = load_ocr(['en'])
 
-    def log(self, message):
-        """Ajoute un message dans la zone de texte."""
-        timestamp = time.strftime("%H:%M:%S")
-        self.log_area.insert(tk.END, f"[{timestamp}] {message}\n")
-        self.log_area.see(tk.END)
 
-    def show_image(self, cv_img):
-        """Convertit une image OpenCV (BGR) en PhotoImage et l'affiche."""
-        rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
-        h, w = rgb.shape[:2]
-        # Redimension pour l'affichage (max 800x600)
-        max_w, max_h = 800, 600
-        scale = min(max_w/w, max_h/h, 1.0)
-        new_w, new_h = int(w*scale), int(h*scale)
-        rgb = cv2.resize(rgb, (new_w, new_h))
-        img_pil = Image.fromarray(rgb)
-        imgtk = ImageTk.PhotoImage(image=img_pil)
-        self.video_label.config(image=imgtk)
-        self.video_label.image = imgtk
+# ------------------ Fonction de nettoyage du texte ------------------
+def extract_plate_text(plate_img):
+    """Extrait le texte d'une image de plaque (numpy array BGR)"""
+    gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
+    results = ocr.readtext(gray, detail=0)
+    text = ' '.join(results)
+    # Garder seulement lettres majuscules et chiffres
+    cleaned = re.sub(r'[^A-Z0-9]', '', text.upper())
+    return cleaned
 
-    def load_image(self):
-        """Ouvre une boîte de dialogue pour choisir une image."""
-        filepath = filedialog.askopenfilename(filetypes=[("Images", "*.jpg *.jpeg *.png")])
-        if not filepath:
-            return
-        self.log(f"Chargement de l'image : {filepath}")
-        img = cv2.imread(filepath)
-        if img is None:
-            self.log("Erreur : impossible de lire l'image.")
-            return
-        annotated_img, plates = self.detector.detect_and_recognize(img)
-        self.show_image(annotated_img)
-        if plates:
-            self.log(f"🔹 Plaques trouvées : {', '.join(plates)}")
-        else:
-            self.log("❌ Aucune plaque détectée sur cette image.")
 
-    def start_camera(self):
-        """Lance le flux webcam dans un thread séparé."""
-        if self.camera_running:
-            self.log("Caméra déjà active.")
-            return
-        self.cap = cv2.VideoCapture(0)
-        if not self.cap.isOpened():
-            self.log("Impossible d'ouvrir la webcam.")
-            return
-        self.camera_running = True
-        self.btn_camera.config(state=tk.DISABLED)
-        self.btn_stop.config(state=tk.NORMAL)
-        self.log("Caméra démarrée. Détection en temps réel...")
-        self.update_camera()
+# ------------------ Processeur vidéo pour streamlit-webrtc ------------------
+class PlateProcessor(VideoProcessorBase):
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        # 1. Convertir le frame PyAV en tableau NumPy (format BGR)
+        img = frame.to_ndarray(format="bgr24")
 
-    def update_camera(self):
-        """Lecture et traitement d'une frame (appelée récursivement)."""
-        if not self.camera_running:
-            return
-        ret, frame = self.cap.read()
-        if not ret:
-            self.log("Perte du flux caméra.")
-            self.stop_camera()
-            return
-        annotated_frame, plates = self.detector.detect_and_recognize(frame)
-        self.show_image(annotated_frame)
-        if plates:
-            self.log(f"📷 {', '.join(plates)}")
-        # Rappel après 30 ms (~30 FPS)
-        self.root.after(30, self.update_camera)
+        # 2. Détection YOLO sur l'image
+        results = model(img, conf=conf_thresh)
 
-    def stop_camera(self):
-        """Arrête la caméra."""
-        self.camera_running = False
-        if self.cap:
-            self.cap.release()
-            self.cap = None
-        self.btn_camera.config(state=tk.NORMAL)
-        self.btn_stop.config(state=tk.DISABLED)
-        self.log("Caméra arrêtée.")
-        # Effacer l'affichage
-        self.video_label.config(image='')
-        self.video_label.image = None
+        # 3. Pour chaque détection, appliquer OCR et annoter
+        for r in results:
+            for box in r.boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                plate_crop = img[y1:y2, x1:x2]
+                if plate_crop.size != 0:
+                    plate_text = extract_plate_text(plate_crop)
+                    # Dessiner rectangle et texte
+                    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(img, plate_text, (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
-    def on_close(self):
-        """Fermeture propre."""
-        self.stop_camera()
-        self.root.destroy()
+        # 4. Retourner le frame annoté
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-if __name__ == "__main__":
-    root = tk.Tk()
-    # METTEZ ICI LE CHEMIN VERS VOTRE MODÈLE YOLO (Plaques)
-    MODEL_PATH = "models/votre_modele.pt"   # <--- À modifier
-    app = PlateDashboard(root, MODEL_PATH)
-    root.protocol("WM_DELETE_WINDOW", app.on_close)
-    root.mainloop()
+
+# ------------------ Lancement du flux vidéo ------------------
+st.markdown("### 📸 Flux webcam en direct")
+ctx = webrtc_streamer(
+    key="license-plate-detection",
+    video_processor_factory=PlateProcessor,  # Nouvelle API
+    media_stream_constraints={"video": True, "audio": False},
+    async_processing=True,
+)
+
+if ctx.video_processor:
+    st.success("✅ Caméra active – la détection s'affiche en direct.")
+else:
+    st.info("🔴 Cliquez sur 'START' pour activer la webcam.")

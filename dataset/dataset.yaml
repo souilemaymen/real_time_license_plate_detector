@@ -1,0 +1,5 @@
+train: /kaggle/input/license-plate-dataset/archive/images/train
+val: /kaggle/input/license-plate-dataset/archive/images/val
+
+nc: 1,  # Number of classes
+names: {0: 'license_plate'}
